@@ -254,6 +254,13 @@ class SchedulerDllmMixin:
 
             # Prepare and add request
             req.init_next_round_input(self.tree_cache)
+            if self.dllm_config.full_sequence:
+                import torch
+
+                req.prefix_indices = torch.empty((0,), dtype=torch.int64)
+                req.cache_protected_len = 0
+                req.host_hit_length = 0
+                req.set_extend_input_len(len(req.fill_ids))
             res = adder.add_one_req(
                 req,
                 has_chunked_req=True,
@@ -298,10 +305,14 @@ class DllmManager:
 
     def get_prefill_requests(self) -> List[Req]:
         """Get all prefill requests from waiting queue."""
+        if self.dllm_config is not None and self.dllm_config.full_sequence:
+            return []
         return [req for req in self.waiting_queue if req.is_dllm_prefill()]
 
     def get_decode_requests(self) -> List[Req]:
         """Get all decode requests from waiting queue."""
+        if self.dllm_config is not None and self.dllm_config.full_sequence:
+            return list(self.waiting_queue)
         return [req for req in self.waiting_queue if not req.is_dllm_prefill()]
 
     def add_waiting_reqs(self, reqs: Union[Req, List[Req]]) -> None:

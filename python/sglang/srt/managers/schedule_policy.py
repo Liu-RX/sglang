@@ -484,7 +484,10 @@ class PrefillAdder:
         self.dllm_block_size = dllm_config.block_size
         max_running_reqs = dllm_config.max_running_requests
 
-        self.rem_dllm_tokens = max_running_reqs * self.dllm_block_size
+        if dllm_config.full_sequence:
+            self.rem_dllm_tokens = self.rem_input_tokens
+        else:
+            self.rem_dllm_tokens = max_running_reqs * self.dllm_block_size
 
     def _get_running_request_total_token_offset(self, req: Req) -> int:
         return (
@@ -605,6 +608,14 @@ class PrefillAdder:
         self.log_input_tokens += extend_input_len
 
     def _get_dllm_remain_tokens(self) -> int:
+        if self.dllm_config is not None and self.dllm_config.full_sequence:
+            _rem_tokens = min(
+                self.rem_dllm_tokens,
+                self.rem_input_tokens,
+                int(self.rem_total_tokens),
+            )
+            return _rem_tokens if _rem_tokens > 0 else self.rem_dllm_tokens
+
         _rem_tokens = min(
             self.rem_dllm_tokens,
             self.dllm_block_size,
@@ -619,11 +630,14 @@ class PrefillAdder:
         # FIXME: consider the case when rem_dllm_tokens < dllm_block_size,
         # the diffusion unmask process may have some problems
         # Make sure at least one page is available
-        trunc_len = (
-            min(self.rem_dllm_tokens, self.dllm_block_size)
-            // self.page_size
-            * self.page_size
-        )
+        if self.dllm_config is not None and self.dllm_config.full_sequence:
+            trunc_len = min(req.extend_input_len, self.rem_dllm_tokens)
+        else:
+            trunc_len = (
+                min(self.rem_dllm_tokens, self.dllm_block_size)
+                // self.page_size
+                * self.page_size
+            )
 
         req.extend_input_len = trunc_len
         req.fill_ids = req.fill_ids[: prefix_len + trunc_len]
@@ -639,6 +653,12 @@ class PrefillAdder:
 
     def add_dllm_staging_req(self, req: Req):
         assert self.dllm_config is not None
+        if self.dllm_config.full_sequence:
+            req.prefix_indices = torch.empty((0,), dtype=torch.int64)
+            req.cache_protected_len = 0
+            req.host_hit_length = 0
+            req.set_extend_input_len(len(req.fill_ids))
+
         _rem_tokens = self._get_dllm_remain_tokens()
 
         if _rem_tokens <= 0:

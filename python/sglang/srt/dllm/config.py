@@ -12,12 +12,16 @@ class DllmConfig:
         block_size: int,
         mask_id: int,
         max_running_requests: int,
+        shift_logits: bool = False,
+        full_sequence: bool = False,
     ):
         self.algorithm = algorithm
         self.algorithm_config = algorithm_config
         self.block_size = block_size
         self.mask_id = mask_id
         self.max_running_requests = max_running_requests
+        self.shift_logits = shift_logits
+        self.full_sequence = full_sequence
 
     @staticmethod
     def from_server_args(
@@ -32,16 +36,26 @@ class DllmConfig:
             model_revision=server_args.revision,
         )
         DLLM_PARAMS = {
+            "DreamModel": {
+                "block_size": 128,
+                "mask_id": 151666,
+                "shift_logits": True,
+                "full_sequence": True,
+            },
             "LLaDA2MoeModelLM": {"block_size": 32, "mask_id": 156895},
             "SDARForCausalLM": {"block_size": 4, "mask_id": 151669},
             "SDARMoeForCausalLM": {"block_size": 4, "mask_id": 151669},
         }
 
+        shift_logits = False
+        full_sequence = False
         arch = model_config.hf_config.architectures[0]
         if arch in DLLM_PARAMS:
             params = DLLM_PARAMS[arch]
             block_size = params["block_size"]
             mask_id = params["mask_id"]
+            shift_logits = params.get("shift_logits", False)
+            full_sequence = params.get("full_sequence", False)
         else:
             raise RuntimeError(f"Unknown diffusion LLM: {arch}")
 
@@ -65,6 +79,8 @@ class DllmConfig:
 
             # Parse common algorithm configurations
             block_size = algorithm_config.get("block_size", block_size)
+            shift_logits = algorithm_config.get("shift_logits", shift_logits)
+            full_sequence = algorithm_config.get("full_sequence", full_sequence)
 
         return DllmConfig(
             algorithm=server_args.dllm_algorithm,
@@ -72,4 +88,6 @@ class DllmConfig:
             block_size=block_size,
             mask_id=mask_id,
             max_running_requests=max_running_requests,
+            shift_logits=shift_logits,
+            full_sequence=full_sequence,
         )

@@ -1027,6 +1027,10 @@ class Req(ReqDllmMixin):
             max_prefix_len = 0
             token_ids = []
 
+        if self.is_dllm() and self.dllm_config.full_sequence:
+            max_prefix_len = 0
+            token_ids = []
+
         if tree_cache is not None:
             if cow_mamba is None:
                 cow_mamba = tree_cache.supports_mamba()
@@ -1060,6 +1064,10 @@ class Req(ReqDllmMixin):
                 self.cache_protected_len = len(self.prefix_indices)
 
             if self.is_dllm():
+                if self.dllm_config.full_sequence:
+                    self.prefix_indices = torch.empty((0,), dtype=torch.int64)
+                    self.host_hit_length = 0
+                    self.cache_protected_len = 0
                 self._update_block_offset_for_dllm()
 
         if (

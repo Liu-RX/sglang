@@ -11,6 +11,8 @@ class DllmAlgorithm:
     ):
         self.block_size = config.block_size
         self.mask_id = config.mask_id
+        self.shift_logits = config.shift_logits
+        self.full_sequence = config.full_sequence
 
     @staticmethod
     def from_server_args(server_args: ServerArgs):

@@ -23,7 +23,9 @@ class ReqDllmMixin:
         self.dllm_config = dllm_config
 
         if self.dllm_config is not None:
-            if len(self.origin_input_ids) < self.dllm_config.block_size:
+            if self.dllm_config.full_sequence:
+                self.dllm_phase = DllmReqPhase.INCOMING_DECODE
+            elif len(self.origin_input_ids) < self.dllm_config.block_size:
                 self.dllm_phase = DllmReqPhase.INCOMING_DECODE
             else:
                 self.dllm_phase = DllmReqPhase.INCOMING_PREFILL
@@ -38,6 +40,10 @@ class ReqDllmMixin:
         ]
 
     def determine_dllm_phase(self: Req):
+        if self.dllm_config.full_sequence:
+            self.dllm_phase = DllmReqPhase.STAGING_DECODE
+            return
+
         prefix_length = len(self.prefix_indices)
         min_required_length = prefix_length + self.dllm_config.block_size
 

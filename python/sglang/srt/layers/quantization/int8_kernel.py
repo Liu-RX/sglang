@@ -18,7 +18,15 @@ if _is_cuda:
 
         enable_sgl_per_token_group_quant_8bit = True
     except ImportError:
-        from sgl_kernel import sgl_per_token_group_quant_int8
+        try:
+            from sgl_kernel import sgl_per_token_group_quant_int8
+        except ImportError as e:
+            _sgl_kernel_int8_import_error = e
+
+            def sgl_per_token_group_quant_int8(*args, **kwargs):
+                raise RuntimeError(
+                    "sgl_kernel is required for INT8 per-token group quantization"
+                ) from _sgl_kernel_int8_import_error
 
         enable_sgl_per_token_group_quant_8bit = False
 

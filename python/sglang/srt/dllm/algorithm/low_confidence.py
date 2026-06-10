@@ -25,6 +25,9 @@ class LowConfidence(DllmAlgorithm):
         model_runner: ModelRunner,
         forward_batch: ForwardBatch,
     ) -> Tuple[Union[LogitsProcessorOutput, torch.Tensor], List[torch.Tensor], bool]:
+        if self.full_sequence:
+            return self._run_full_sequence(model_runner, forward_batch)
+
         batch_size = forward_batch.batch_size
         # Here, the forward_batch full logits contains all the blocks
         # such as [dllm_block_size * batch_size, hidden_size]
@@ -68,6 +71,8 @@ class LowConfidence(DllmAlgorithm):
                 curr_logits = logits_output.full_logits[
                     curr_block_start:curr_block_end,
                 ]
+                if self.shift_logits:
+                    curr_logits = torch.cat([curr_logits[:1], curr_logits[:-1]], dim=0)
 
                 x = torch.argmax(curr_logits, dim=-1)
                 p = torch.squeeze(
@@ -97,6 +102,100 @@ class LowConfidence(DllmAlgorithm):
         next_token_ids_list = [
             next_token_ids[i, start_list[i] :] for i in range(batch_size)
         ]
+
+        return logits_output, next_token_ids_list, can_run_cuda_graph
+
+    def _run_full_sequence(
+        self,
+        model_runner: ModelRunner,
+        forward_batch: ForwardBatch,
+    ) -> Tuple[Union[LogitsProcessorOutput, torch.Tensor], List[torch.Tensor], bool]:
+        batch_size = forward_batch.batch_size
+        seq_lens = (
+            forward_batch.extend_seq_lens_cpu
+            if forward_batch.extend_seq_lens_cpu is not None
+            else forward_batch.seq_lens_cpu.tolist()
+        )
+        seq_starts = []
+        offset = 0
+        for seq_len in seq_lens:
+            seq_starts.append(offset)
+            offset += seq_len
+
+        start_list = []
+        for batch_id, seq_len in enumerate(seq_lens):
+            seq_start = seq_starts[batch_id]
+            curr_input_ids = forward_batch.input_ids[seq_start : seq_start + seq_len]
+            mask_positions = torch.nonzero(
+                curr_input_ids == self.mask_id, as_tuple=True
+            )[0]
+            start_list.append(
+                mask_positions[0].item() if mask_positions.numel() > 0 else seq_len
+            )
+
+        if not (forward_batch.input_ids == self.mask_id).any():
+            out = model_runner.forward(forward_batch, pp_proxy_tensors=None)
+            return out.logits_output, [], out.can_run_graph
+
+        steps = self.block_size
+        timesteps = torch.linspace(
+            1, 1e-3, steps + 1, device=forward_batch.input_ids.device
+        )
+        can_run_cuda_graph = False
+        logits_output = None
+        for i in range(steps):
+            if not (forward_batch.input_ids == self.mask_id).any():
+                break
+
+            out = model_runner.forward(forward_batch, pp_proxy_tensors=None)
+            logits_output, can_run_cuda_graph = out.logits_output, out.can_run_graph
+
+            for batch_id, seq_len in enumerate(seq_lens):
+                seq_start = seq_starts[batch_id]
+                seq_end = seq_start + seq_len
+                curr_input_ids = forward_batch.input_ids[seq_start:seq_end]
+                curr_logits = logits_output.full_logits[seq_start:seq_end]
+                if self.shift_logits:
+                    curr_logits = torch.cat([curr_logits[:1], curr_logits[:-1]], dim=0)
+
+                mask_index = curr_input_ids == self.mask_id
+                if not mask_index.any():
+                    continue
+
+                mask_logits = curr_logits[mask_index]
+                probs = F.softmax(mask_logits, dim=-1)
+                x0 = torch.argmax(probs, dim=-1)
+                confidence = torch.sum(probs * torch.log(probs + 1e-10), dim=-1)
+
+                t = timesteps[i]
+                s = timesteps[i + 1]
+                num_mask_token = mask_index.sum().item()
+                num_transfer = (
+                    int(num_mask_token * (1 - s / t))
+                    if i < steps - 1
+                    else int(num_mask_token)
+                )
+                if num_transfer <= 0:
+                    continue
+
+                full_confidence = torch.full_like(
+                    curr_input_ids, -torch.inf, dtype=curr_logits.dtype
+                )
+                full_confidence[mask_index] = confidence
+                _, transfer_index = torch.topk(full_confidence, num_transfer)
+
+                x_ = torch.full_like(curr_input_ids, self.mask_id)
+                x_[mask_index] = x0
+                curr_input_ids[transfer_index] = x_[transfer_index]
+
+        out = model_runner.forward(forward_batch, pp_proxy_tensors=None)
+        logits_output, can_run_cuda_graph = out.logits_output, out.can_run_graph
+
+        next_token_ids_list = []
+        for batch_id, seq_len in enumerate(seq_lens):
+            seq_start = seq_starts[batch_id]
+            curr_input_ids = forward_batch.input_ids[seq_start : seq_start + seq_len]
+            next_token_ids_list.append(curr_input_ids[start_list[batch_id] :])
 
         return logits_output, next_token_ids_list, can_run_cuda_graph
 

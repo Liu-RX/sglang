@@ -31,6 +31,31 @@ threshold: 0.95
 
 # Default: 32, for LLaDA2MoeModelLM
 block_size: 32
+
+# Optional self-speculative decoding.
+# Supported verification modes are 1, 2, and "spiffy".
+# Prefix/suffix matching and verify_batch_size=4 are not enabled here.
+speculative_decoding: false
+verify_batch_size: 1
+speculative_confidence_threshold: 0.5
+self_speculative_confidence_threshold: 0.7
+num_speculate_tokens: 3
+```
+
+To enable speculative decoding, put the options above in a YAML file and pass it
+with `--dllm-algorithm-config`. For example:
+
+```bash Command
+python3 -m sglang.launch_server \
+  --model-path Dream-org/Dream-v0-Instruct-7B \
+  --trust-remote-code \
+  --dllm-algorithm LowConfidence \
+  --dllm-algorithm-config examples/dllm_low_confidence_spec_spiffy.yaml \
+  --max-running-requests 1 \
+  --disable-cuda-graph \
+  --attention-backend flashinfer \
+  --host 0.0.0.0 \
+  --port 30000
 ```
 
 JointThreshold Config:

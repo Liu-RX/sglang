@@ -1,0 +1,4 @@
+threshold: 0.9
+block_size: 32
+full_sequence: true
+alg: confidence_threshold

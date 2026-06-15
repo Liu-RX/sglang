@@ -250,6 +250,7 @@ inputs/
 
 # Eval Cache
 .longbench_cache/
+benchmark/gsm8k/results_*/
 
 # CUDA kernel develop, profile and debug
 .clangd

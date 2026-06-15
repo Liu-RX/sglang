@@ -78,6 +78,76 @@ CUDA_VISIBLE_DEVICES=3 PORT=31000 MODEL_PATH=/path/to/Dream-v0-Instruct-7B \
   bash scripts/start_dream_sglang_server.sh
 ```
 
+## 启动 dLLM 投机解码
+
+本仓库的 `LowConfidence` dLLM 算法支持可选自投机解码。当前移植了三种验证方式：
+
+- `verify_batch_size: 1`：单候选验证，低于 `threshold` 的投机 token 会被打回 mask。
+- `verify_batch_size: 2`：两候选验证，在“保留全部投机 token”和“全部打回 mask”的候选之间选择。
+- `verify_batch_size: spiffy`：按 spiffy DAG 构造最多 8 个候选节点，并按父子结构逐层接受。
+
+未移植 pangu 版本中的前缀/后缀匹配，也未启用 `verify_batch_size=4`。
+
+示例配置位于：
+
+```text
+examples/dllm_low_confidence_spec_vbs1.yaml
+examples/dllm_low_confidence_spec_vbs2.yaml
+examples/dllm_low_confidence_spec_spiffy.yaml
+```
+
+HTTP 服务启动方式：
+
+```bash
+cd /home/liurenxi/sglang-for-dllm
+CUDA_VISIBLE_DEVICES=1 \
+DLLM_ALGORITHM_CONFIG=examples/dllm_low_confidence_spec_spiffy.yaml \
+HOST=0.0.0.0 PORT=30000 \
+  bash scripts/start_dream_sglang_server.sh
+```
+
+也可以直接传给 `launch_server`：
+
+```bash
+python -m sglang.launch_server \
+  --model-path Dream-org/Dream-v0-Instruct-7B \
+  --trust-remote-code \
+  --dllm-algorithm LowConfidence \
+  --dllm-algorithm-config examples/dllm_low_confidence_spec_vbs2.yaml \
+  --max-running-requests 1 \
+  --context-length 1024 \
+  --disable-cuda-graph \
+  --attention-backend flashinfer \
+  --host 0.0.0.0 \
+  --port 30000
+```
+
+关键配置项：
+
+```yaml
+speculative_decoding: true
+alg: confidence_threshold
+speculative_decoding_mode: greedy  # greedy 或 confidence
+verify_batch_size: spiffy  # 也可以是 1 或 2
+threshold: 0.95
+speculative_confidence_threshold: 0.5
+self_speculative_confidence_threshold: 0.7
+confidence_speculative_threshold: 0.9
+num_speculate_tokens: 3
+```
+
+`alg: confidence_threshold` 对齐 pangu 的 confidence 解码方式：每轮至少解码一个最高置信度 mask token，并额外解码所有置信度超过 `threshold` 的 mask token。投机解码通常需要在该模式下开启才有明显收益。
+
+`speculative_decoding_mode: greedy` 保持原有投机选点行为：每轮从超过
+`self_speculative_confidence_threshold` 的 mask token 中取最多
+`num_speculate_tokens` 个最高置信度位置进行投机填充。
+
+`speculative_decoding_mode: confidence` 会解码所有置信度超过
+`confidence_speculative_threshold` 的 mask token，默认阈值为 `0.9`，不受
+`num_speculate_tokens` 限制。
+
+`num_speculate_tokens` 控制 greedy 模式下每轮从模型自身分布中预填的 token 数量。调高通常更激进，但候选验证开销也会增加。
+
 服务启动后可检查健康状态：
 
 ```bash
@@ -93,6 +163,23 @@ curl http://127.0.0.1:30000/get_model_info
 cd /home/liurenxi/sglang-for-dllm
 
 CUDA_VISIBLE_DEVICES=1 \
+CUDA_HOME=/home/liurenxi/anaconda3/envs/lrx-dflash \
+PATH=/home/liurenxi/anaconda3/envs/lrx-dflash/nvvm/bin:/home/liurenxi/anaconda3/envs/lrx-dflash/bin:$PATH \
+LD_LIBRARY_PATH=/home/liurenxi/anaconda3/envs/lrx-dflash/lib:/home/liurenxi/anaconda3/envs/lrx-dflash/targets/x86_64-linux/lib:${LD_LIBRARY_PATH:-} \
+CPATH=/home/liurenxi/anaconda3/envs/lrx-dflash/targets/x86_64-linux/include:/home/liurenxi/anaconda3/envs/lrx-dflash/lib/python3.11/site-packages/nvidia/cuda_runtime/include:${CPATH:-} \
+CPLUS_INCLUDE_PATH=/home/liurenxi/anaconda3/envs/lrx-dflash/targets/x86_64-linux/include:/home/liurenxi/anaconda3/envs/lrx-dflash/lib/python3.11/site-packages/nvidia/cuda_runtime/include:${CPLUS_INCLUDE_PATH:-} \
+SGLANG_ENABLE_JIT_DEEPGEMM=0 \
+TRANSFORMERS_VERBOSITY=error \
+/home/liurenxi/anaconda3/envs/lrx-dflash/bin/python run_dream_gsm8k_smoke.py
+```
+
+启用投机解码的 smoke 测试：
+
+```bash
+cd /home/liurenxi/sglang-for-dllm
+
+CUDA_VISIBLE_DEVICES=1 \
+DLLM_ALGORITHM_CONFIG=examples/dllm_low_confidence_spec_spiffy.yaml \
 CUDA_HOME=/home/liurenxi/anaconda3/envs/lrx-dflash \
 PATH=/home/liurenxi/anaconda3/envs/lrx-dflash/nvvm/bin:/home/liurenxi/anaconda3/envs/lrx-dflash/bin:$PATH \
 LD_LIBRARY_PATH=/home/liurenxi/anaconda3/envs/lrx-dflash/lib:/home/liurenxi/anaconda3/envs/lrx-dflash/targets/x86_64-linux/lib:${LD_LIBRARY_PATH:-} \

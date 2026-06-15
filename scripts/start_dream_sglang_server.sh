@@ -7,6 +7,10 @@ MODEL_PATH="${MODEL_PATH:-Dream-org/Dream-v0-Instruct-7B}"
 HOST="${HOST:-0.0.0.0}"
 PORT="${PORT:-30000}"
 GPU="${CUDA_VISIBLE_DEVICES:-1}"
+DLLM_CONFIG_ARGS=()
+if [[ -n "${DLLM_ALGORITHM_CONFIG:-}" ]]; then
+  DLLM_CONFIG_ARGS=(--dllm-algorithm-config "${DLLM_ALGORITHM_CONFIG}")
+fi
 
 export CUDA_VISIBLE_DEVICES="${GPU}"
 export CUDA_HOME="${CUDA_HOME:-${CONDA_ENV}}"
@@ -23,6 +27,7 @@ exec "${CONDA_ENV}/bin/python" -m sglang.launch_server \
   --model-path "${MODEL_PATH}" \
   --trust-remote-code \
   --dllm-algorithm LowConfidence \
+  "${DLLM_CONFIG_ARGS[@]}" \
   --max-running-requests 1 \
   --context-length 1024 \
   --disable-cuda-graph \

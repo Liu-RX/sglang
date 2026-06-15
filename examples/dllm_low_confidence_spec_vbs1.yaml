@@ -1,0 +1,8 @@
+threshold: 0.95
+block_size: 128
+full_sequence: true
+speculative_decoding: true
+verify_batch_size: 1
+speculative_confidence_threshold: 0.5
+self_speculative_confidence_threshold: 0.7
+num_speculate_tokens: 3

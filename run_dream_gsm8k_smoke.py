@@ -1,9 +1,12 @@
+import os
+
 import sglang as sgl
 from transformers import AutoTokenizer
 
 
 def main():
-    model_path = "Dream-org/Dream-v0-Instruct-7B"
+    model_path = os.getenv("MODEL_PATH", "Dream-org/Dream-v0-Instruct-7B")
+    dllm_algorithm_config = os.getenv("DLLM_ALGORITHM_CONFIG")
     question = (
         "Natalia sold clips to 48 of her friends in April, and then she sold half "
         "as many clips in May. How many clips did Natalia sell altogether in April "
@@ -20,6 +23,7 @@ def main():
         model_path=model_path,
         trust_remote_code=True,
         dllm_algorithm="LowConfidence",
+        dllm_algorithm_config=dllm_algorithm_config,
         max_running_requests=1,
         context_length=1024,
         disable_cuda_graph=True,

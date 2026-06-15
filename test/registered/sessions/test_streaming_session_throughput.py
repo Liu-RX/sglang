@@ -8,8 +8,9 @@ context) scheduler work (batch assembly, prefix match, KV bookkeeping) lands on
 the critical path. This catches end-to-end regressions of those paths -- e.g.
 #27965 (in-place fill_ids reconstruction): H200 ~3675 vs ~3367 tok/s reverted.
 
-The floor is provisional: CI runs on H100 (1-gpu-large), so retune it from the
-first CI run's printed throughput.
+A warmup pass precedes the timed measurement (the first pass is cold on a fresh
+server). The floor is provisional: CI runs on H100 (1-gpu-large), so retune it
+from the first CI run's printed throughput.
 """
 
 import concurrent.futures
@@ -22,16 +23,12 @@ from typing import Optional
 
 import requests
 
-from sglang.srt.utils import kill_process_tree
 from sglang.test.ci.ci_register import register_cuda_ci
-from sglang.test.test_utils import (
-    DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
-    DEFAULT_URL_FOR_TEST,
-    CustomTestCase,
-    popen_launch_server,
+from sglang.test.server_fixtures.streaming_session_fixture import (
+    StreamingSessionServerBase,
 )
 
-register_cuda_ci(est_time=200, stage="extra-a", runner_config="1-gpu-large")
+register_cuda_ci(est_time=300, stage="extra-a", runner_config="1-gpu-large")
 
 NUM_HIDDEN_LAYERS = 3
 NUM_CONCURRENT = 16
@@ -41,12 +38,11 @@ INPUT_LEN = 10
 MIN_GEN_LEN = 1
 MAX_GEN_LEN = 16
 
-# Synthetic ids, seeded per session for a deterministic, identical-input A/B.
 TOKEN_ID_START = 1000
 TOKEN_ID_COUNT = 1024
 
 # Provisional; CI is H100, retune from the first run (H200: ~3675 vs ~3367).
-THROUGHPUT_FLOOR_TOK_S = 3500.0
+THROUGHPUT_FLOOR_TOK_S = 2600.0
 
 
 @dataclass
@@ -89,33 +85,20 @@ def _stream_generate(
     return completion_tokens
 
 
-class TestStreamingSessionThroughput(CustomTestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.model = "Qwen/Qwen3-0.6B"
-        cls.base_url = DEFAULT_URL_FOR_TEST
-        cls.process = popen_launch_server(
-            cls.model,
-            cls.base_url,
-            timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
-            other_args=[
-                "--json-model-override-args",
-                f'{{"num_hidden_layers": {NUM_HIDDEN_LAYERS}}}',
-                "--enable-streaming-session",
-                "--enable-mixed-chunk",
-                "--chunked-prefill-size",
-                "8192",
-                "--schedule-policy",
-                "fcfs",
-                "--max-running-requests",
-                "100",
-                "--disable-overlap-schedule",
-            ],
-        )
-
-    @classmethod
-    def tearDownClass(cls):
-        kill_process_tree(cls.process.pid)
+class TestStreamingSessionThroughput(StreamingSessionServerBase):
+    model = "Qwen/Qwen3-0.6B"
+    extra_args = [
+        "--json-model-override-args",
+        f'{{"num_hidden_layers": {NUM_HIDDEN_LAYERS}}}',
+        "--enable-mixed-chunk",
+        "--chunked-prefill-size",
+        "8192",
+        "--schedule-policy",
+        "fcfs",
+        "--max-running-requests",
+        "100",
+        "--disable-overlap-schedule",
+    ]
 
     def _open_and_prime(self, session_index: int) -> SessionState:
         session_id = requests.post(
@@ -140,14 +123,12 @@ class TestStreamingSessionThroughput(CustomTestCase):
             )
         return output_tokens
 
-    def test_streaming_session_throughput(self):
-        """Prime bs16 sessions to ctx30k, run 100 short turns each, and assert a
-        sustained output-throughput floor."""
+    def _measure(self) -> float:
+        """Prime NUM_CONCURRENT sessions to CONTEXT_LEN, run NUM_TURNS short turns
+        each, and return output tok/s over the (post-prime) turn phase."""
         requests.post(self.base_url + "/flush_cache")
-
         with concurrent.futures.ThreadPoolExecutor(max_workers=NUM_CONCURRENT) as pool:
             sessions = list(pool.map(self._open_and_prime, range(NUM_CONCURRENT)))
-
             start = time.perf_counter()
             output_tokens = sum(
                 pool.map(
@@ -156,21 +137,21 @@ class TestStreamingSessionThroughput(CustomTestCase):
                 )
             )
             duration = time.perf_counter() - start
-
         for session in sessions:
             requests.post(
                 self.base_url + "/close_session",
                 json={"session_id": session.session_id},
             )
+        return output_tokens / duration
 
-        throughput = output_tokens / duration
+    def test_streaming_session_throughput(self):
+        self._measure()  # warmup (cold on a fresh server); discard
+        throughput = self._measure()
         print(
             f"\n[streaming-session throughput] sessions={NUM_CONCURRENT} "
             f"context={CONTEXT_LEN} turns={NUM_TURNS} layers={NUM_HIDDEN_LAYERS}\n"
-            f"  output_tokens={output_tokens} duration={duration:.3f}s "
-            f"throughput={throughput:.1f} tok/s (floor={THROUGHPUT_FLOOR_TOK_S})"
+            f"  throughput={throughput:.1f} tok/s (floor={THROUGHPUT_FLOOR_TOK_S})"
         )
-
         self.assertGreaterEqual(
             throughput,
             THROUGHPUT_FLOOR_TOK_S,

@@ -31,8 +31,8 @@ register_cuda_ci(est_time=300, stage="extra-a", runner_config="1-gpu-large")
 
 NUM_HIDDEN_LAYERS = 3
 NUM_CONCURRENT = 16
-CONTEXT_LEN = 30000
-NUM_TURNS = 100
+CONTEXT_LEN = 20000
+NUM_TURNS = 900
 
 # Floor = 3% under the measured throughput on the CI runner (1-gpu-large = H100):
 # with #27965 -> 3117.5 tok/s, reverted -> ~2586 tok/s (~17% slower, caught).

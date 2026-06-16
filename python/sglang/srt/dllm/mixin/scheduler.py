@@ -26,6 +26,41 @@ class SchedulerDllmMixin:
         )
         self.dllm_manager = DllmManager(dllm_config=self.dllm_config)
 
+    def _release_full_sequence_round_kv(self: Scheduler, req: Req) -> None:
+        """Release the previous full-sequence dLLM round before re-prefill.
+
+        full_sequence dLLM recomputes the entire prompt + output + mask block every
+        round with an empty prefix. Reusing the same req slot without freeing the
+        previous round first would overwrite req_to_token entries and make those
+        old KV pages unreachable for the final request release.
+        """
+        if (
+            self.dllm_config is None
+            or not self.dllm_config.full_sequence
+            or req.req_pool_idx is None
+            or req.kv_allocated_len <= 0
+        ):
+            return
+        if req.kv_committed_freed or req.kv_overallocated_freed:
+            return
+
+        kv_indices = self.req_to_token_pool.req_to_token[
+            req.req_pool_idx, : req.kv_allocated_len
+        ]
+        self.token_to_kv_pool_allocator.free(kv_indices)
+        logger.debug(
+            "Released full-sequence dLLM round KV: rid=%s, tokens=%s",
+            req.rid,
+            req.kv_allocated_len,
+        )
+
+        req.kv_allocated_len = 0
+        req.kv_committed_len = 0
+        req.kv_committed_freed = False
+        req.kv_overallocated_freed = False
+        req.cache_protected_len = 0
+        req.already_computed = 0
+
     def get_new_batch_dllm(self: Scheduler) -> Optional[ScheduleBatch]:
         """Generate a new batch for DLLM (Diffusion LLM) scheduling."""
         if self.enable_priority_preemption:
@@ -254,6 +289,8 @@ class SchedulerDllmMixin:
                     break
 
             # Prepare and add request
+            if self.dllm_config.full_sequence:
+                self._release_full_sequence_round_kv(req)
             req.init_next_round_input(self.tree_cache)
             if self.dllm_config.full_sequence:
                 import torch

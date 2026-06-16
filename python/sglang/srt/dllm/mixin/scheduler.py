@@ -111,20 +111,31 @@ class SchedulerDllmMixin:
 
                     next_token_ids = result.next_token_ids[idx].tolist()
                     new_tokens = len(next_token_ids)
-                    if new_tokens == 0:
-                        continue
+                    if new_tokens > 0:
+                        req.fill_ids[-new_tokens:] = next_token_ids[:]
+                        self.num_generated_tokens += new_tokens
 
-                    req.fill_ids[-new_tokens:] = next_token_ids[:]
-                    self.num_generated_tokens += new_tokens
-
-                    req.output_ids.extend(next_token_ids)
-                    req.check_finished(new_accepted_len=new_tokens)
+                        req.output_ids.extend(next_token_ids)
+                        req.check_finished(new_accepted_len=new_tokens)
 
                     if req.finished():
                         release_kv_cache(req, self.tree_cache)
                         req.time_stats.set_completion_time()
+                    elif self.dllm_config.full_sequence:
+                        self._release_full_sequence_round_kv(req)
 
                 self.stream_output(batch.reqs, batch.return_logprob)
+            finally:
+                self.token_to_kv_pool_allocator.free_group_end()
+        elif self.dllm_config.full_sequence:
+            self.token_to_kv_pool_allocator.free_group_begin()
+            try:
+                for req in batch.reqs:
+                    if req.finished():
+                        release_kv_cache(req, self.tree_cache)
+                        req.time_stats.set_completion_time()
+                    else:
+                        self._release_full_sequence_round_kv(req)
             finally:
                 self.token_to_kv_pool_allocator.free_group_end()
 

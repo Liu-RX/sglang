@@ -1,0 +1,6 @@
+threshold: 0.9
+block_size: 32
+full_sequence: true
+alg: confidence_threshold
+speculative_decoding: false
+verify_batch_size: 1

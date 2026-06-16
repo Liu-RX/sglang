@@ -347,7 +347,14 @@ async def run_prompt_batch(
     return await asyncio.gather(*tasks)
 
 
-def run_all(
+async def flush_engine_cache(engine):
+    tokenizer_manager = getattr(engine, "tokenizer_manager", None)
+    if tokenizer_manager is not None and hasattr(tokenizer_manager, "flush_cache"):
+        return await tokenizer_manager.flush_cache()
+    return await asyncio.to_thread(engine.flush_cache)
+
+
+async def run_all(
     engine,
     prompts,
     sampling_params,
@@ -370,26 +377,24 @@ def run_all(
         if total > submit_batch_size:
             print(f"submit batch {start + 1}-{end}/{total}", flush=True)
 
-        batch_outputs = asyncio.run(
-            run_prompt_batch(
-                engine,
-                indexed_prompts,
-                sampling_params,
-                parallel,
-                completed,
-                total,
-                log_each_request,
-            )
+        batch_outputs = await run_prompt_batch(
+            engine,
+            indexed_prompts,
+            sampling_params,
+            parallel,
+            completed,
+            total,
+            log_each_request,
         )
         for output in batch_outputs:
             outputs[output["index"]] = output
         completed += len(batch_outputs)
 
         if flush_cache_between_batches:
-            flush_result = engine.flush_cache()
+            flush_result = await flush_engine_cache(engine)
             print(f"flush_cache after {completed}/{total}: {flush_result}", flush=True)
         if sleep_between_batches > 0 and completed < total:
-            time.sleep(sleep_between_batches)
+            await asyncio.sleep(sleep_between_batches)
 
     if any(output is None for output in outputs):
         missing = [i for i, output in enumerate(outputs) if output is None]
@@ -551,15 +556,17 @@ def main() -> int:
     engine = build_engine(args)
     tic = time.perf_counter()
     try:
-        outputs = run_all(
-            engine,
-            prompts,
-            sampling_params,
-            args.parallel,
-            args.submit_batch_size,
-            args.sleep_between_batches,
-            args.flush_cache_between_batches,
-            args.log_each_request,
+        outputs = asyncio.run(
+            run_all(
+                engine,
+                prompts,
+                sampling_params,
+                args.parallel,
+                args.submit_batch_size,
+                args.sleep_between_batches,
+                args.flush_cache_between_batches,
+                args.log_each_request,
+            )
         )
     finally:
         engine.shutdown()

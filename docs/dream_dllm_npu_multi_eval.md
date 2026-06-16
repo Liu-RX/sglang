@@ -61,6 +61,7 @@ benchmark/dllm_eval/results_npu_20260615_120000/
 export TASKS="gsm8k mbpp humaneval"
 export MODES="baseline vbs1 vbs2"
 export PARALLEL=1
+export SUBMIT_BATCH_SIZE=1
 export MAX_RUNNING_REQUESTS=1
 export MEM_FRACTION_STATIC=0.75
 export CONTEXT_LENGTH=2048
@@ -90,6 +91,41 @@ export HUMANEVAL_DATA_PATH=/path/to/HumanEval.jsonl.gz
 - MBPP JSONL/JSON：每条包含 `prompt` 或 `text`，以及 `test_list`。
 - HumanEval JSONL/JSON/JSONL.GZ：每条包含 `task_id`、`prompt`、`test`、`entry_point`。
 
+## NPU 稳定性和定位参数
+
+默认脚本按最保守方式提交请求：
+
+```bash
+export SUBMIT_BATCH_SIZE=1
+export PARALLEL=1
+export MAX_RUNNING_REQUESTS=1
+export LOG_EACH_REQUEST=1
+export STRICT_MEM_CHECK_IDLE=1
+```
+
+- `SUBMIT_BATCH_SIZE=1`：每次只向 offline Engine 提交一个请求，便于定位哪条样本触发调度器内存池检查。
+- `LOG_EACH_REQUEST=1`：打印 `starting i/N` 和 `completed i/N`。
+- `STRICT_MEM_CHECK_IDLE=1`：保持 SGLang 空闲期内存池严格检查。若报 `pool memory leak detected`，日志中的 `failed i/N` 可用于定位样本。
+
+如果小样本严格检查可以通过，但完整数据集仍在空闲期报内存池检查错误，可先确认是否为检查器/账本误报：
+
+```bash
+TASKS=gsm8k MODES=baseline \
+STRICT_MEM_CHECK_IDLE=0 \
+SUBMIT_BATCH_SIZE=1 \
+PARALLEL=1 \
+MAX_RUNNING_REQUESTS=1 \
+bash scripts/ascend_dllm/run_dream_multi_eval_npu.sh
+```
+
+`STRICT_MEM_CHECK_IDLE=0` 会把该检查从抛异常改成 warning，只建议用于确认和临时完整跑分；如果随后出现可用 KV 持续下降或 OOM，说明仍是真实释放问题。
+
+需要强制每批之间清空 cache 时可加：
+
+```bash
+export FLUSH_CACHE_BETWEEN_BATCHES=1
+```
+
 ## 单独跑一个任务
 
 ```bash
@@ -104,7 +140,9 @@ python3 benchmark/dllm_eval/bench_dream_dllm_tasks.py \
   --device npu \
   --attention-backend ascend \
   --disable-cuda-graph \
-  --disable-radix-cache
+  --disable-radix-cache \
+  --submit-batch-size 1 \
+  --log-each-request
 ```
 
 ## 配置文件

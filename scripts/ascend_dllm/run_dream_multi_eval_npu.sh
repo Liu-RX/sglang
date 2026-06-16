@@ -25,12 +25,17 @@ HUMANEVAL_MAX_NEW_TOKENS="${HUMANEVAL_MAX_NEW_TOKENS:-512}"
 
 CONTEXT_LENGTH="${CONTEXT_LENGTH:-2048}"
 PARALLEL="${PARALLEL:-1}"
+SUBMIT_BATCH_SIZE="${SUBMIT_BATCH_SIZE:-1}"
+SLEEP_BETWEEN_BATCHES="${SLEEP_BETWEEN_BATCHES:-0}"
+FLUSH_CACHE_BETWEEN_BATCHES="${FLUSH_CACHE_BETWEEN_BATCHES:-0}"
+LOG_EACH_REQUEST="${LOG_EACH_REQUEST:-1}"
 MAX_RUNNING_REQUESTS="${MAX_RUNNING_REQUESTS:-1}"
 MEM_FRACTION_STATIC="${MEM_FRACTION_STATIC:-0.75}"
 TP_SIZE="${TP_SIZE:-1}"
 BASE_GPU_ID="${BASE_GPU_ID:-0}"
 DTYPE="${DTYPE:-auto}"
 CODE_TIMEOUT="${CODE_TIMEOUT:-10}"
+STRICT_MEM_CHECK_IDLE="${STRICT_MEM_CHECK_IDLE:-1}"
 
 BASELINE_CONFIG="${BASELINE_CONFIG:-}"
 VBS1_CONFIG="${VBS1_CONFIG:-}"
@@ -55,6 +60,7 @@ export HCCL_EXEC_TIMEOUT="${HCCL_EXEC_TIMEOUT:-200}"
 export STREAMS_PER_DEVICE="${STREAMS_PER_DEVICE:-32}"
 export AUTO_USE_UC_MEMORY="${AUTO_USE_UC_MEMORY:-0}"
 export TRANSFORMERS_VERBOSITY="${TRANSFORMERS_VERBOSITY:-error}"
+export SGLANG_ENABLE_STRICT_MEM_CHECK_DURING_IDLE="${STRICT_MEM_CHECK_IDLE}"
 
 cd "${REPO_ROOT}"
 mkdir -p "${OUTPUT_DIR}"
@@ -99,12 +105,23 @@ max_tokens_for_task() {
   esac
 }
 
+is_truthy() {
+  case "${1,,}" in
+    1|true|yes|y|on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 echo "Running Dream dLLM multi-eval on Ascend NPU"
 echo "  MODEL_PATH=${MODEL_PATH}"
 echo "  ASCEND_RT_VISIBLE_DEVICES=${ASCEND_RT_VISIBLE_DEVICES}"
 echo "  TASKS=${TASKS}"
 echo "  MODES=${MODES}"
 echo "  OUTPUT_DIR=${OUTPUT_DIR}"
+echo "  PARALLEL=${PARALLEL}"
+echo "  SUBMIT_BATCH_SIZE=${SUBMIT_BATCH_SIZE}"
+echo "  MAX_RUNNING_REQUESTS=${MAX_RUNNING_REQUESTS}"
+echo "  STRICT_MEM_CHECK_IDLE=${STRICT_MEM_CHECK_IDLE}"
 
 for task in ${TASKS}; do
   for mode in ${MODES}; do
@@ -130,6 +147,8 @@ for task in ${TASKS}; do
       --max-new-tokens "${max_new_tokens}"
       --context-length "${CONTEXT_LENGTH}"
       --parallel "${PARALLEL}"
+      --submit-batch-size "${SUBMIT_BATCH_SIZE}"
+      --sleep-between-batches "${SLEEP_BETWEEN_BATCHES}"
       --max-running-requests "${MAX_RUNNING_REQUESTS}"
       --mem-fraction-static "${MEM_FRACTION_STATIC}"
       --device npu
@@ -143,6 +162,12 @@ for task in ${TASKS}; do
     )
     if [[ -n "${data_path}" ]]; then
       args+=(--data-path "${data_path}")
+    fi
+    if is_truthy "${FLUSH_CACHE_BETWEEN_BATCHES}"; then
+      args+=(--flush-cache-between-batches)
+    fi
+    if is_truthy "${LOG_EACH_REQUEST}"; then
+      args+=(--log-each-request)
     fi
 
     echo "[run] ${task}/${mode}"

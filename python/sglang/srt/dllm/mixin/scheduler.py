@@ -70,27 +70,28 @@ class SchedulerDllmMixin:
 
         if result.next_token_ids:
             self.token_to_kv_pool_allocator.free_group_begin()
+            try:
+                for idx in range(batch.batch_size()):
+                    req = batch.reqs[idx]
 
-            for idx in range(batch.batch_size()):
-                req = batch.reqs[idx]
+                    next_token_ids = result.next_token_ids[idx].tolist()
+                    new_tokens = len(next_token_ids)
+                    if new_tokens == 0:
+                        continue
 
-                next_token_ids = result.next_token_ids[idx].tolist()
-                new_tokens = len(next_token_ids)
-                if new_tokens == 0:
-                    continue
+                    req.fill_ids[-new_tokens:] = next_token_ids[:]
+                    self.num_generated_tokens += new_tokens
 
-                req.fill_ids[-new_tokens:] = next_token_ids[:]
-                self.num_generated_tokens += new_tokens
+                    req.output_ids.extend(next_token_ids)
+                    req.check_finished(new_accepted_len=new_tokens)
 
-                req.output_ids.extend(next_token_ids)
-                req.check_finished(new_accepted_len=new_tokens)
+                    if req.finished():
+                        release_kv_cache(req, self.tree_cache)
+                        req.time_stats.set_completion_time()
 
-                if req.finished():
-                    release_kv_cache(req, self.tree_cache)
-                    req.time_stats.set_completion_time()
-
-            self.stream_output(batch.reqs, batch.return_logprob)
-            self.token_to_kv_pool_allocator.free_group_end()
+                self.stream_output(batch.reqs, batch.return_logprob)
+            finally:
+                self.token_to_kv_pool_allocator.free_group_end()
 
         can_run_cuda_graph = getattr(result, "can_run_cuda_graph", False)
         self.report_prefill_stats(

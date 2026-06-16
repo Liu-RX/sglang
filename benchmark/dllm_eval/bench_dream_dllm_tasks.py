@@ -13,7 +13,6 @@ import re
 import subprocess
 import sys
 import tempfile
-import textwrap
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,6 +25,13 @@ if str(PYTHON_DIR) not in sys.path:
     sys.path.insert(0, str(PYTHON_DIR))
 
 INVALID = -9999999
+
+
+def env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in ("1", "true", "yes", "y", "on")
 
 
 @dataclass
@@ -300,24 +306,95 @@ def judge_code_outputs(
     return rows
 
 
-async def run_all(engine, prompts, sampling_params, parallel: int):
+async def run_prompt_batch(
+    engine,
+    indexed_prompts: list[tuple[int, str]],
+    sampling_params,
+    parallel: int,
+    completed_before: int,
+    total: int,
+    log_each_request: bool,
+):
     semaphore = asyncio.Semaphore(parallel)
-    completed = 0
+    completed = completed_before
 
     async def run_one(index: int, prompt: str):
         nonlocal completed
         async with semaphore:
+            if log_each_request:
+                print(f"starting {index + 1}/{total}", flush=True)
             tic = time.perf_counter()
-            output = await engine.async_generate(prompt, sampling_params)
+            try:
+                output = await engine.async_generate(prompt, sampling_params)
+            except Exception as exc:
+                print(
+                    f"failed {index + 1}/{total}: {type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                raise
             output["request_latency"] = time.perf_counter() - tic
             output["index"] = index
             completed += 1
-            if completed % 10 == 0 or completed == len(prompts):
-                print(f"completed {completed}/{len(prompts)}", flush=True)
+            if log_each_request or completed % 10 == 0 or completed == total:
+                print(f"completed {completed}/{total}", flush=True)
             return output
 
-    tasks = [asyncio.create_task(run_one(i, prompt)) for i, prompt in enumerate(prompts)]
+    tasks = [
+        asyncio.create_task(run_one(index, prompt))
+        for index, prompt in indexed_prompts
+    ]
     return await asyncio.gather(*tasks)
+
+
+def run_all(
+    engine,
+    prompts,
+    sampling_params,
+    parallel: int,
+    submit_batch_size: int,
+    sleep_between_batches: float,
+    flush_cache_between_batches: bool,
+    log_each_request: bool,
+):
+    total = len(prompts)
+    if submit_batch_size <= 0:
+        submit_batch_size = total
+    submit_batch_size = max(1, submit_batch_size)
+
+    outputs: list[dict[str, Any] | None] = [None] * total
+    completed = 0
+    for start in range(0, total, submit_batch_size):
+        end = min(start + submit_batch_size, total)
+        indexed_prompts = list(enumerate(prompts[start:end], start=start))
+        if total > submit_batch_size:
+            print(f"submit batch {start + 1}-{end}/{total}", flush=True)
+
+        batch_outputs = asyncio.run(
+            run_prompt_batch(
+                engine,
+                indexed_prompts,
+                sampling_params,
+                parallel,
+                completed,
+                total,
+                log_each_request,
+            )
+        )
+        for output in batch_outputs:
+            outputs[output["index"]] = output
+        completed += len(batch_outputs)
+
+        if flush_cache_between_batches:
+            flush_result = engine.flush_cache()
+            print(f"flush_cache after {completed}/{total}: {flush_result}", flush=True)
+        if sleep_between_batches > 0 and completed < total:
+            time.sleep(sleep_between_batches)
+
+    if any(output is None for output in outputs):
+        missing = [i for i, output in enumerate(outputs) if output is None]
+        raise RuntimeError(f"Missing outputs for request indices: {missing[:20]}")
+    return [output for output in outputs if output is not None]
 
 
 def to_chat_prompts(model_path: str, examples: Iterable[EvalExample]) -> list[str]:
@@ -420,6 +497,28 @@ def main() -> int:
     parser.add_argument("--max-new-tokens", type=int, default=256)
     parser.add_argument("--context-length", type=int, default=2048)
     parser.add_argument("--parallel", type=int, default=1)
+    parser.add_argument(
+        "--submit-batch-size",
+        type=int,
+        default=int(os.getenv("SUBMIT_BATCH_SIZE", "1")),
+        help="Number of prompts submitted before returning to the sync runner. "
+        "Use 1 for the most conservative NPU/debug run; use <=0 to submit all.",
+    )
+    parser.add_argument(
+        "--sleep-between-batches",
+        type=float,
+        default=float(os.getenv("SLEEP_BETWEEN_BATCHES", "0")),
+    )
+    parser.add_argument(
+        "--flush-cache-between-batches",
+        action="store_true",
+        default=env_flag("FLUSH_CACHE_BETWEEN_BATCHES", False),
+    )
+    parser.add_argument(
+        "--log-each-request",
+        action="store_true",
+        default=env_flag("LOG_EACH_REQUEST", False),
+    )
     parser.add_argument("--max-running-requests", type=int, default=1)
     parser.add_argument("--mem-fraction-static", type=float, default=0.75)
     parser.add_argument("--device", default="npu")
@@ -452,7 +551,16 @@ def main() -> int:
     engine = build_engine(args)
     tic = time.perf_counter()
     try:
-        outputs = asyncio.run(run_all(engine, prompts, sampling_params, args.parallel))
+        outputs = run_all(
+            engine,
+            prompts,
+            sampling_params,
+            args.parallel,
+            args.submit_batch_size,
+            args.sleep_between_batches,
+            args.flush_cache_between_batches,
+            args.log_each_request,
+        )
     finally:
         engine.shutdown()
     generation_latency = time.perf_counter() - tic
@@ -485,6 +593,10 @@ def main() -> int:
             "max_new_tokens": args.max_new_tokens,
             "context_length": args.context_length,
             "parallel": args.parallel,
+            "submit_batch_size": args.submit_batch_size,
+            "sleep_between_batches": args.sleep_between_batches,
+            "flush_cache_between_batches": args.flush_cache_between_batches,
+            "log_each_request": args.log_each_request,
             "max_running_requests": args.max_running_requests,
             "mem_fraction_static": args.mem_fraction_static,
             "device": args.device,

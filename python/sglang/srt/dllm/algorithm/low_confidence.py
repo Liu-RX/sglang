@@ -86,6 +86,21 @@ def _gather_token_probs_from_logits(
     return token_probs.squeeze(-1)
 
 
+def _sync_profile_device():
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        return
+
+    npu = getattr(torch, "npu", None)
+    if npu is None:
+        return
+    try:
+        if npu.is_available():
+            npu.synchronize()
+    except Exception:
+        pass
+
+
 def _build_verify_candidates(
     x_base: torch.Tensor,
     spec_positions: List[int],
@@ -367,6 +382,19 @@ class LowConfidence(DllmAlgorithm):
             "normal_steps": 0,
             "batched_vbs2_steps": 0,
             "batched_vbs2_spec_positions": 0,
+            "spec_proposed_positions": 0,
+            "spec_proposal_steps": 0,
+            "spec_verify_steps": 0,
+            "spec_verify_positions": 0,
+            "spec_accepted_positions": 0,
+            "spec_rejected_positions": 0,
+            "spec_blocked_normal_unmask_steps": 0,
+            "batch_sample_steps": 0,
+            "active_sample_steps": 0,
+            "inactive_sample_steps": 0,
+            "max_active_batch_size": 0,
+            "min_active_batch_size": None,
+            "spec_verify_by_mode": {},
             "forward": {},
         }
 
@@ -391,12 +419,10 @@ class LowConfidence(DllmAlgorithm):
         profile = getattr(self, "_profile_state", None)
         if profile is None:
             return fn()
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
+        _sync_profile_device()
         start = time.perf_counter()
         out = fn()
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
+        _sync_profile_device()
         elapsed = time.perf_counter() - start
         stats = profile["forward"].setdefault(
             label,
@@ -414,6 +440,71 @@ class LowConfidence(DllmAlgorithm):
             return
         skips = profile.setdefault("candidate_batch_skips", {})
         skips[reason] = skips.get(reason, 0) + 1
+
+    def _profile_add(self, key: str, value: int):
+        profile = getattr(self, "_profile_state", None)
+        if profile is None:
+            return
+        profile[key] = profile.get(key, 0) + int(value)
+
+    def _profile_batch_activity(self, active_count: int, batch_size: int):
+        profile = getattr(self, "_profile_state", None)
+        if profile is None:
+            return
+        active_count = int(active_count)
+        batch_size = int(batch_size)
+        profile["batch_sample_steps"] = (
+            profile.get("batch_sample_steps", 0) + batch_size
+        )
+        profile["active_sample_steps"] = (
+            profile.get("active_sample_steps", 0) + active_count
+        )
+        profile["inactive_sample_steps"] = (
+            profile.get("inactive_sample_steps", 0) + batch_size - active_count
+        )
+        profile["max_active_batch_size"] = max(
+            int(profile.get("max_active_batch_size", 0)), active_count
+        )
+        min_active = profile.get("min_active_batch_size")
+        profile["min_active_batch_size"] = (
+            active_count if min_active is None else min(int(min_active), active_count)
+        )
+
+    def _profile_spec_proposal(self, count: int):
+        if count <= 0:
+            return
+        self._profile_add("spec_proposed_positions", count)
+        self._profile_add("spec_proposal_steps", 1)
+
+    def _profile_spec_verify(self, mode: str, proposed: int, accepted: int):
+        if proposed <= 0:
+            return
+        accepted = max(0, min(int(accepted), int(proposed)))
+        rejected = int(proposed) - accepted
+        profile = getattr(self, "_profile_state", None)
+        if profile is None:
+            return
+
+        profile["spec_verify_steps"] = profile.get("spec_verify_steps", 0) + 1
+        profile["spec_verify_positions"] = (
+            profile.get("spec_verify_positions", 0) + int(proposed)
+        )
+        profile["spec_accepted_positions"] = (
+            profile.get("spec_accepted_positions", 0) + accepted
+        )
+        profile["spec_rejected_positions"] = (
+            profile.get("spec_rejected_positions", 0) + rejected
+        )
+
+        by_mode = profile.setdefault("spec_verify_by_mode", {})
+        stats = by_mode.setdefault(
+            mode,
+            {"steps": 0, "positions": 0, "accepted": 0, "rejected": 0},
+        )
+        stats["steps"] += 1
+        stats["positions"] += int(proposed)
+        stats["accepted"] += accepted
+        stats["rejected"] += rejected
 
     def run(
         self,
@@ -789,12 +880,15 @@ class LowConfidence(DllmAlgorithm):
         unmask_per_sample = [True] * batch_size
 
         rejected_specs = []
+        proposed_count = 0
+        accepted_count = 0
         for batch_id, (seq_start, seq_len) in enumerate(
             self._iter_sequences(forward_batch)
         ):
             spec_pos = speculate_index[batch_id]
             if not spec_pos:
                 continue
+            proposed_count += len(spec_pos)
             pos = torch.tensor(spec_pos, dtype=torch.long, device=x.device)
             tok = x[pos]
             token_probs = _gather_token_probs_from_logits(logits_base, pos, tok)
@@ -804,11 +898,16 @@ class LowConfidence(DllmAlgorithm):
             entry = (batch_id, seq_start, seq_len, pos)
             if not accepted:
                 rejected_specs.append(entry)
+            else:
+                accepted_count += len(spec_pos)
+
+        self._profile_spec_verify("vbs2", proposed_count, accepted_count)
 
         if not rejected_specs:
             return x, logits_full, unmask_per_sample
 
         for batch_id, seq_start, seq_len, pos in rejected_specs:
+            self._profile_add("spec_blocked_normal_unmask_steps", 1)
             x[pos] = self.mask_id
             rejected_pos[batch_id, pos - seq_start] = True
             unmask_per_sample[batch_id] = False
@@ -867,6 +966,9 @@ class LowConfidence(DllmAlgorithm):
                     self.threshold,
                     baseline,
                 )
+                self._profile_spec_verify(
+                    "spiffy", len(spec_pos), len(accepted_pos)
+                )
                 x = best_seq.clone()
                 if batch_size == 1:
                     logits_full = logits_verify[best_idx]
@@ -878,6 +980,7 @@ class LowConfidence(DllmAlgorithm):
                     ][seq_start : seq_start + seq_len]
 
                 if len(accepted_pos) == 0:
+                    self._profile_add("spec_blocked_normal_unmask_steps", 1)
                     unmask_per_sample[batch_id] = False
                     for pos in spec_pos:
                         rejected_pos[batch_id, pos - seq_start] = True
@@ -896,7 +999,10 @@ class LowConfidence(DllmAlgorithm):
                     _gather_token_probs_from_logits(logits_base, pos, tok)
                     < self.threshold
                 )
+                accepted_count = len(spec_pos) - int(reject.sum().item())
+                self._profile_spec_verify("vbs1", len(spec_pos), accepted_count)
                 if bool(reject.any().item()):
+                    self._profile_add("spec_blocked_normal_unmask_steps", 1)
                     rejected_abs = pos[reject]
                     x[rejected_abs] = self.mask_id
                     rejected_pos[batch_id, rejected_abs - seq_start] = True
@@ -956,6 +1062,9 @@ class LowConfidence(DllmAlgorithm):
                 self.threshold,
                 self.mask_id,
             )
+            self._profile_spec_verify(
+                "candidate", len(spec_pos), len(accepted_spec)
+            )
             x = best_seq.clone()
             if batch_size == 1:
                 logits_full = logits_verify[best_idx]
@@ -967,6 +1076,7 @@ class LowConfidence(DllmAlgorithm):
                 ]
 
             if len(accepted_spec) == 0:
+                self._profile_add("spec_blocked_normal_unmask_steps", 1)
                 unmask_per_sample[batch_id] = False
                 for pos in spec_pos:
                     rejected_pos[batch_id, pos - seq_start] = True
@@ -984,6 +1094,7 @@ class LowConfidence(DllmAlgorithm):
         speculate_index = [[] for _ in range(batch_size)]
         speculate_conf = [[] for _ in range(batch_size)]
         speculate_token = [[] for _ in range(batch_size)]
+        proposed_count = 0
 
         for batch_id, (seq_start, seq_len) in enumerate(
             self._iter_sequences(forward_batch)
@@ -1027,7 +1138,9 @@ class LowConfidence(DllmAlgorithm):
             speculate_index[batch_id].extend(selected_positions.tolist())
             speculate_conf[batch_id].extend(selected_probs.tolist())
             speculate_token[batch_id].extend(selected_toks.tolist())
+            proposed_count += int(selected_positions.numel())
 
+        self._profile_spec_proposal(proposed_count)
         return speculate_index, speculate_conf, speculate_token
 
     def _run_full_sequence(
@@ -1094,6 +1207,13 @@ class LowConfidence(DllmAlgorithm):
 
             if profile is not None:
                 profile["steps"] += 1
+                active_count = 0
+                for seq_start, seq_len in zip(seq_starts, seq_lens):
+                    curr_input_ids = forward_batch.input_ids[
+                        seq_start : seq_start + seq_len
+                    ]
+                    active_count += int((curr_input_ids == self.mask_id).any().item())
+                self._profile_batch_activity(active_count, batch_size)
             unmask_per_sample = [True] * batch_size
             if profile is not None:
                 profile["normal_steps"] += 1

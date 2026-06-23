@@ -33,6 +33,11 @@ def main() -> int:
         "tok/s",
         "req/s",
         "completion_tokens",
+        "spec_accept",
+        "spec_proposed",
+        "blocked_unmask",
+        "inactive_steps",
+        "normal_fw",
     ]
     table = ["| " + " | ".join(headers) + " |"]
     table.append("| " + " | ".join(["---"] * len(headers)) + " |")
@@ -49,6 +54,15 @@ def main() -> int:
                     f"{row.get('output_throughput_tok_s', 0):.2f}",
                     f"{row.get('request_throughput_req_s', 0):.2f}",
                     str(row.get("completion_tokens", 0)),
+                    ""
+                    if row.get("dllm_spec_accept_rate") is None
+                    else f"{row.get('dllm_spec_accept_rate', 0):.2%}",
+                    str(row.get("dllm_spec_proposed_positions", "")),
+                    str(row.get("dllm_spec_blocked_normal_unmask_steps", "")),
+                    ""
+                    if row.get("dllm_inactive_sample_step_rate") is None
+                    else f"{row.get('dllm_inactive_sample_step_rate', 0):.2%}",
+                    str(row.get("dllm_normal_forward_calls", "")),
                 ]
             )
             + " |"

@@ -490,6 +490,131 @@ def compute_metrics(task: str, examples, outputs, judge_rows, latency, judge_lat
     return metrics, per_sample_extra
 
 
+def summarize_dllm_profile(path: str | Path | None) -> dict[str, Any]:
+    if not path:
+        return {}
+
+    path = Path(path)
+    if not path.exists():
+        return {
+            "dllm_profile_path": str(path),
+            "dllm_profile_records": 0,
+        }
+
+    records = []
+    with path.open("r", encoding="utf-8") as fin:
+        for line in fin:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+
+    metrics: dict[str, Any] = {
+        "dllm_profile_path": str(path),
+        "dllm_profile_records": len(records),
+    }
+    if not records:
+        return metrics
+
+    int_fields = [
+        "steps",
+        "normal_steps",
+        "spec_proposed_positions",
+        "spec_proposal_steps",
+        "spec_verify_steps",
+        "spec_verify_positions",
+        "spec_accepted_positions",
+        "spec_rejected_positions",
+        "spec_blocked_normal_unmask_steps",
+        "batch_sample_steps",
+        "active_sample_steps",
+        "inactive_sample_steps",
+    ]
+    for field in int_fields:
+        metrics[f"dllm_{field}"] = sum(int(row.get(field, 0)) for row in records)
+
+    verify_positions = metrics.get("dllm_spec_verify_positions", 0)
+    accepted_positions = metrics.get("dllm_spec_accepted_positions", 0)
+    proposal_steps = metrics.get("dllm_spec_proposal_steps", 0)
+    metrics["dllm_spec_accept_rate"] = (
+        accepted_positions / verify_positions if verify_positions > 0 else None
+    )
+    metrics["dllm_avg_spec_proposed_per_step"] = (
+        metrics.get("dllm_spec_proposed_positions", 0) / proposal_steps
+        if proposal_steps > 0
+        else None
+    )
+    batch_sample_steps = metrics.get("dllm_batch_sample_steps", 0)
+    metrics["dllm_inactive_sample_step_rate"] = (
+        metrics.get("dllm_inactive_sample_steps", 0) / batch_sample_steps
+        if batch_sample_steps > 0
+        else None
+    )
+    metrics["dllm_active_sample_step_rate"] = (
+        metrics.get("dllm_active_sample_steps", 0) / batch_sample_steps
+        if batch_sample_steps > 0
+        else None
+    )
+    active_batch_sizes = [
+        int(row.get("max_active_batch_size", 0)) for row in records
+    ]
+    min_active_batch_sizes = [
+        int(row["min_active_batch_size"])
+        for row in records
+        if row.get("min_active_batch_size") is not None
+    ]
+    metrics["dllm_max_active_batch_size"] = (
+        max(active_batch_sizes) if active_batch_sizes else None
+    )
+    metrics["dllm_min_active_batch_size"] = (
+        min(min_active_batch_sizes) if min_active_batch_sizes else None
+    )
+
+    forward_totals: dict[str, dict[str, float]] = {}
+    verify_by_mode: dict[str, dict[str, int]] = {}
+    for row in records:
+        for label, stats in row.get("forward", {}).items():
+            dst = forward_totals.setdefault(
+                label,
+                {"calls": 0, "time_sec": 0.0, "tokens": 0, "branches": 0},
+            )
+            dst["calls"] += int(stats.get("calls", 0))
+            dst["time_sec"] += float(stats.get("time_sec", 0.0))
+            dst["tokens"] += int(stats.get("tokens", 0))
+            dst["branches"] += int(stats.get("branches", 0))
+        for mode, stats in row.get("spec_verify_by_mode", {}).items():
+            dst = verify_by_mode.setdefault(
+                mode,
+                {"steps": 0, "positions": 0, "accepted": 0, "rejected": 0},
+            )
+            dst["steps"] += int(stats.get("steps", 0))
+            dst["positions"] += int(stats.get("positions", 0))
+            dst["accepted"] += int(stats.get("accepted", 0))
+            dst["rejected"] += int(stats.get("rejected", 0))
+
+    metrics["dllm_forward"] = forward_totals
+    metrics["dllm_spec_verify_by_mode"] = verify_by_mode
+    metrics["dllm_forward_time_sec"] = sum(
+        stats["time_sec"] for stats in forward_totals.values()
+    )
+    metrics["dllm_normal_forward_calls"] = int(
+        forward_totals.get("normal_forward", {}).get("calls", 0)
+    )
+    metrics["dllm_final_forward_calls"] = int(
+        forward_totals.get("final_forward", {}).get("calls", 0)
+    )
+    metrics["dllm_candidate_batch_forward_calls"] = int(
+        forward_totals.get("candidate_batch_forward", {}).get("calls", 0)
+    )
+    metrics["dllm_candidate_serial_forward_calls"] = int(
+        forward_totals.get("candidate_serial_forward", {}).get("calls", 0)
+    )
+    return metrics
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--task", choices=["gsm8k", "mbpp", "humaneval"], required=True)
@@ -537,6 +662,7 @@ def main() -> int:
     parser.add_argument("--dtype", default="auto")
     parser.add_argument("--log-level", default="info")
     parser.add_argument("--dllm-algorithm-config", default=None)
+    parser.add_argument("--dllm-profile-path", default=None)
     parser.add_argument("--mode-name", default="baseline")
     parser.add_argument("--output-dir", default="benchmark/dllm_eval/results")
     parser.add_argument("--temperature", type=float, default=0.0)
@@ -552,6 +678,13 @@ def main() -> int:
         "top_p": args.top_p,
         "max_new_tokens": args.max_new_tokens,
     }
+
+    profile_path = Path(args.dllm_profile_path) if args.dllm_profile_path else None
+    old_profile_env = os.environ.get("SGLANG_DLLM_PROFILE_PATH")
+    if profile_path is not None:
+        profile_path.parent.mkdir(parents=True, exist_ok=True)
+        profile_path.unlink(missing_ok=True)
+        os.environ["SGLANG_DLLM_PROFILE_PATH"] = str(profile_path)
 
     engine = build_engine(args)
     tic = time.perf_counter()
@@ -570,6 +703,11 @@ def main() -> int:
         )
     finally:
         engine.shutdown()
+        if profile_path is not None:
+            if old_profile_env is None:
+                os.environ.pop("SGLANG_DLLM_PROFILE_PATH", None)
+            else:
+                os.environ["SGLANG_DLLM_PROFILE_PATH"] = old_profile_env
     generation_latency = time.perf_counter() - tic
 
     judge_tic = time.perf_counter()
@@ -592,6 +730,7 @@ def main() -> int:
         generation_latency,
         judge_latency,
     )
+    metrics.update(summarize_dllm_profile(profile_path))
     metrics.update(
         {
             "mode": args.mode_name,
@@ -612,6 +751,7 @@ def main() -> int:
             "base_gpu_id": args.base_gpu_id,
             "dtype": args.dtype,
             "dllm_algorithm_config": args.dllm_algorithm_config,
+            "dllm_profile_path": str(profile_path) if profile_path else None,
             "temperature": args.temperature,
             "top_p": args.top_p,
             "code_timeout": args.code_timeout,

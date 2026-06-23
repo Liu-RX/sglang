@@ -36,6 +36,7 @@ BASE_GPU_ID="${BASE_GPU_ID:-0}"
 DTYPE="${DTYPE:-auto}"
 CODE_TIMEOUT="${CODE_TIMEOUT:-10}"
 STRICT_MEM_CHECK_IDLE="${STRICT_MEM_CHECK_IDLE:-0}"
+DLLM_PROFILE="${DLLM_PROFILE:-0}"
 
 BASELINE_CONFIG="${BASELINE_CONFIG:-}"
 VBS1_CONFIG="${VBS1_CONFIG:-}"
@@ -122,10 +123,12 @@ echo "  PARALLEL=${PARALLEL}"
 echo "  SUBMIT_BATCH_SIZE=${SUBMIT_BATCH_SIZE}"
 echo "  MAX_RUNNING_REQUESTS=${MAX_RUNNING_REQUESTS}"
 echo "  STRICT_MEM_CHECK_IDLE=${STRICT_MEM_CHECK_IDLE}"
+echo "  DLLM_PROFILE=${DLLM_PROFILE}"
 
 for task in ${TASKS}; do
   for mode in ${MODES}; do
     metrics_path="${OUTPUT_DIR}/${task}_${mode}_metrics.json"
+    profile_path="${OUTPUT_DIR}/${task}_${mode}_dllm_profile.jsonl"
     if [[ -f "${metrics_path}" ]]; then
       echo "[skip] ${task}/${mode}"
       continue
@@ -168,6 +171,9 @@ for task in ${TASKS}; do
     fi
     if is_truthy "${LOG_EACH_REQUEST}"; then
       args+=(--log-each-request)
+    fi
+    if is_truthy "${DLLM_PROFILE}"; then
+      args+=(--dllm-profile-path "${profile_path}")
     fi
 
     echo "[run] ${task}/${mode}"
